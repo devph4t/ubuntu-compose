@@ -61,6 +61,9 @@ hand it to another PC with no repo checkout required:
 
 ```powershell
 docker save my_wsl_ubuntu:26.04 -o my_wsl_ubuntu_26.04.tar
+docker save -o "my_wsl_ubuntu_26.04_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar" my_wsl_ubuntu:26.04
+docker save my_wsl_ubuntu:26.04 | wsl gzip > "my_wsl_ubuntu_26.04_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz"
+docker save my_wsl_ubuntu:26.04 | gzip > "my_wsl_ubuntu_26.04_$(date +%Y%m%d_%H%M%S).tar.gz"
 # on the other PC:
 docker load -i my_wsl_ubuntu_26.04.tar
 ```

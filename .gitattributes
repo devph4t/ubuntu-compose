@@ -1,0 +1,15 @@
+# Force LF line endings on checkout regardless of core.autocrlf, so shell
+# scripts never silently break with `bash: bad interpreter: ...bash\r` —
+# see MANUAL.md's repeated "save with LF, not CRLF" warnings; this makes
+# that automatic instead of a thing to remember.
+* text=auto eol=lf
+
+*.sh text eol=lf
+connect-kind.sh text eol=lf
+pxset text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.env text eol=lf
+.env.example text eol=lf
+*.example text eol=lf
