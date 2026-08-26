@@ -32,7 +32,7 @@ Your Windows username in the examples is `2521183489`. Change it if different.
 5. [What gets installed](#3b-tooling)
 6. [File 3 — `docker-compose.yml` (full code)](#4-file-docker-compose)
 7. [File 4 — `connect-kind.sh` (full code)](#5-file-connect-kind)
-7b. [`config\pre-scripts\` — auto-loaded for every user's shell](#5b-pre-scripts)
+7b. [Baked-in auto-run vs. `config\pre-scripts\` on-demand commands](#5b-pre-scripts)
 8. [Step-by-step from the start](#6-steps)
 9. [Cluster prerequisites for Ping charts (ServiceMonitor / cert-manager)](#6b-prereqs)
 10. [Troubleshooting table](#7-troubleshooting)
@@ -79,16 +79,20 @@ ubuntu\
 ├── .env                  ← copy from .env.example; PROXY_ACTIVE/PROXY_HOST/PROXY_PORT + VM_MEMORY/VM_CPUS
 ├── .env.example
 ├── config\
-│   ├── connect-kind.sh
+│   ├── connect-kind.sh   ← mounted onto PATH, run explicitly: `connect-kind`
 │   ├── wslconfig.example
 │   ├── install-cluster-prereqs.sh
 │   ├── environments\local\cert-manager-values.yaml
-│   └── pre-scripts\     ← bind-mounted whole; auto-loaded for EVERY user's shell
-│       ├── 00-completions.sh   (TAB completion, sourced via /etc/bash.bashrc)
-│       ├── 10-proxy.sh         (proxy reachability check, sourced too)
-│       └── pxset                (manual `pxset set`/`pxset unset`, run — not sourced)
+│   └── pre-scripts\
+│       └── pxset          ← mounted onto PATH, run explicitly: `pxset set`
 └── workspace\           ← you create this; your repos (ia-ext-ciam) go here
 ```
+
+TAB completion and the proxy reachability check used to live here as
+bind-mounted `.sh` files, auto-sourced on every shell. They're now baked
+directly into the Dockerfile's `/etc/bash.bashrc` instead — see section 7b.
+`config\pre-scripts\` is reserved for the other kind of thing: commands you
+invoke explicitly during `docker exec`, like `pxset`.
 
 `.env` is gitignored and holds two different kinds of setting, treated
 differently on purpose:
@@ -96,10 +100,11 @@ differently on purpose:
 - `PROXY_ACTIVE`/`PROXY_HOST`/`PROXY_PORT` are **not** used for `${VAR}`
   substitution in `docker-compose.yml` and never reach `docker build`.
   Instead they're bind-mounted read-only into the container at
-  `/etc/ping-linux.env` and read straight off disk by `config\pre-scripts\`
-  on every new shell. Edit any time — no rebuild, no `docker compose
-  up`/`down`. `PROXY_ACTIVE=true`/`false` is a real string comparison here
-  (plain bash, not compose interpolation), so it means exactly what it says.
+  `/etc/ping-linux.env` and read straight off disk by the proxy check baked
+  into the Dockerfile's `/etc/bash.bashrc` (section 7b) on every new shell.
+  Edit any time — no rebuild, no `docker compose up`/`down`.
+  `PROXY_ACTIVE=true`/`false` is a real string comparison here (plain bash,
+  not compose interpolation), so it means exactly what it says.
 - `VM_MEMORY`/`VM_CPUS` **are** standard `${VAR}` substitution, consumed by
   `docker-compose.yml`'s `deploy.resources.limits` — they're
   container-creation attributes, so there's no way around needing `docker
@@ -290,19 +295,46 @@ RUN curl -sSL https://sdk.cloud.google.com > /tmp/install_gcloud.sh \
     && rm -f /tmp/install_gcloud.sh
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
-# ---- Shell: auto-load config/pre-scripts for EVERY user's shell ----
-# The scripts themselves (TAB completion, proxy safety net, ...) are
-# bind-mounted read-only at runtime from ./config/pre-scripts (see
-# docker-compose.yml) — editable without rebuilding the image. This just
-# installs the loader into /etc/bash.bashrc, sourced by every interactive
-# shell for every user. Only *.sh files are auto-sourced. See MANUAL.md
-# section 7b for what ships there.
+# ---- Shell: baked-in TAB completion + proxy safety net, EVERY user's shell ----
+# This runs automatically on every `docker exec` shell, so it's baked into
+# the image at build time rather than sourced from a bind mount —
+# /etc/bash.bashrc is sourced by every interactive non-login bash shell for
+# every user (not just root's ~/.bashrc). The proxy check still reads live
+# values from the bind-mounted .env (/etc/ping-linux.env, see
+# docker-compose.yml) on each new shell, so .env edits still take effect
+# without a rebuild — only the completion/reachability-check CODE is fixed
+# at build time, not the proxy values themselves. See section 7b.
+#
+# config/pre-scripts/ is for the opposite case: commands you invoke
+# explicitly during `docker exec` (e.g. `pxset set`), not auto-run scripts.
 RUN printf '%s\n' \
-    '# Auto-load every *.sh in config/pre-scripts (bind-mounted, all users).' \
-    'if [ -d /etc/profile.d/pre-scripts ]; then' \
-    '  for f in /etc/profile.d/pre-scripts/*.sh; do' \
-    '    [ -f "$f" ] && source "$f"' \
-    '  done' \
+    '# ---- TAB completion (kubectl/helm/kind/kubectx/kubens/gcloud/pingcli) ----' \
+    'source /usr/share/bash-completion/bash_completion 2>/dev/null || true' \
+    'alias k=kubectl' \
+    'source <(kubectl completion bash) 2>/dev/null || true' \
+    'complete -o default -F __start_kubectl k 2>/dev/null || true' \
+    'source <(helm completion bash) 2>/dev/null || true' \
+    'source <(kind completion bash) 2>/dev/null || true' \
+    'source /opt/kubectx/completion/kubectx.bash 2>/dev/null || true' \
+    'source /opt/kubectx/completion/kubens.bash 2>/dev/null || true' \
+    'command -v pingcli >/dev/null 2>&1 && source <(pingcli completion bash) 2>/dev/null || true' \
+    '[ -f /root/google-cloud-sdk/completion.bash.inc ] && source /root/google-cloud-sdk/completion.bash.inc' \
+    '' \
+    '# ---- Proxy safety net: reads PROXY_ACTIVE/PROXY_HOST/PROXY_PORT live' \
+    '# from the bind-mounted .env (/etc/ping-linux.env) on every new shell,' \
+    '# and only enables the proxy if it answers within 1s.' \
+    'if [ -f /etc/ping-linux.env ]; then' \
+    '  set -a' \
+    '  source /etc/ping-linux.env' \
+    '  set +a' \
+    'fi' \
+    'if [ "${PROXY_ACTIVE:-}" = "true" ] && [ -n "${PROXY_HOST:-}" ] \' \
+    '   && curl -s -m 1 -o /dev/null "http://${PROXY_HOST}:${PROXY_PORT}"; then' \
+    '  export HTTP_PROXY="http://${PROXY_HOST}:${PROXY_PORT}/"' \
+    '  export HTTPS_PROXY="$HTTP_PROXY"' \
+    '  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"' \
+    'else' \
+    '  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy' \
     'fi' \
     >> /etc/bash.bashrc
 
@@ -413,13 +445,12 @@ services:
       - ./workspace:/root/source
       # Persist kubeconfig between restarts.
       - kube-config:/root/.kube
-      # The helper script, mounted as a command.
+      # ---- Custom shell commands: mounted straight onto PATH, run
+      # explicitly during `docker exec` — not auto-run. See 7b for why TAB
+      # completion and the proxy check are handled differently (baked into
+      # the Dockerfile instead).
       - ./config/connect-kind.sh:/usr/local/bin/connect-kind:ro
-      # Manual proxy toggle, mounted as a command: `pxset set` / `pxset unset`.
       - ./config/pre-scripts/pxset:/usr/local/bin/pxset:ro
-      # Auto-loaded for every user's shell (TAB completion, proxy safety
-      # net) via /etc/bash.bashrc, installed by the Dockerfile. See 7b.
-      - ./config/pre-scripts:/etc/profile.d/pre-scripts:ro
       # Live config, read straight from disk — edit this file, no
       # rebuild/up/down needed. See 7b.
       - ./.env:/etc/ping-linux.env:ro
@@ -485,40 +516,60 @@ kubectl get nodes
 ---
 
 <a name="5b-pre-scripts"></a>
-## 7b. `config\pre-scripts\` — auto-loaded for every user's shell
+## 7b. Two different patterns: baked-in auto-run vs. `config\pre-scripts\` commands
 
-The whole `config\pre-scripts\` folder is bind-mounted read-only into the
-container at `/etc/profile.d/pre-scripts` (see docker-compose.yml). The
-Dockerfile appends a small loader to **`/etc/bash.bashrc`** — the system-wide
-bashrc sourced by every interactive shell for every user, not just root's
-`~/.bashrc` — that sources every `*.sh` file found there, in sorted order:
+Two things need to happen on every `docker exec` shell (TAB completion, the
+proxy safety net) and one thing you invoke on demand (`pxset`). These are
+deliberately wired differently:
+
+**Auto-run, every shell, every user — baked into the Dockerfile.** TAB
+completion and the proxy reachability check are appended straight into
+**`/etc/bash.bashrc`** at image build time (the system-wide bashrc sourced by
+every interactive shell for every user, not just root's `~/.bashrc`). They
+are NOT bind-mounted `.sh` files anymore — the code itself ships in the
+image. The proxy check still reads `PROXY_ACTIVE`/`PROXY_HOST`/`PROXY_PORT`
+fresh from the bind-mounted `/etc/ping-linux.env` (your `.env`) each time a
+shell opens, so editing `.env` still takes effect immediately with no
+rebuild and no `docker compose up`/`down` — only the *code that reads it* is
+now fixed at build time, not the proxy values. Changing the completion or
+proxy-check logic itself does need a rebuild (`docker compose build`), since
+there's no bind mount left to edit live.
 
 ```bash
-if [ -d /etc/profile.d/pre-scripts ]; then
-  for f in /etc/profile.d/pre-scripts/*.sh; do
-    [ -f "$f" ] && source "$f"
-  done
+# TAB completion
+source /usr/share/bash-completion/bash_completion 2>/dev/null || true
+alias k=kubectl
+source <(kubectl completion bash) 2>/dev/null || true
+# ... helm/kind/kubectx/kubens/pingcli/gcloud completions ...
+
+# Proxy safety net
+if [ -f /etc/ping-linux.env ]; then
+  set -a; source /etc/ping-linux.env; set +a
+fi
+if [ "${PROXY_ACTIVE:-}" = "true" ] && [ -n "${PROXY_HOST:-}" ] \
+   && curl -s -m 1 -o /dev/null "http://${PROXY_HOST}:${PROXY_PORT}"; then
+  export HTTP_PROXY="http://${PROXY_HOST}:${PROXY_PORT}/" HTTPS_PROXY="$HTTP_PROXY"
+  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+else
+  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 fi
 ```
 
-Because it's a bind mount, editing or adding a script under `config\pre-scripts\`
-takes effect the next time a shell opens — no image rebuild needed. Number-prefix
-new scripts (`00-`, `10-`, `20-`, ...) to control load order.
+(Full version in the Dockerfile listing, section 4.)
 
-What ships today:
+**Invoke on demand — `config\pre-scripts\`.** Anything you want to run as an
+explicit command during `docker exec` (not auto-sourced) goes here, mounted
+straight onto `PATH` in `docker-compose.yml` — the same pattern as
+`connect-kind.sh`. Today that's:
 
-| File | Sourced automatically? | Purpose |
-|------|------------------------|---------|
-| `00-completions.sh` | Yes (`.sh`) | TAB completion for kubectl/helm/kind/kubectx/kubens/gcloud/pingcli, plus the `k` alias. |
-| `10-proxy.sh` | Yes (`.sh`) | Reads `PROXY_ACTIVE`/`PROXY_HOST`/`PROXY_PORT` fresh from the bind-mounted `/etc/ping-linux.env` on every new shell, and only turns the proxy on if `PROXY_ACTIVE=true` **and** `PROXY_HOST:PROXY_PORT` answers within 1s — so an unreachable proxy (VPN off, wrong network) doesn't silently break every command. |
-| `pxset` | **No** (no `.sh` extension — by design) | Also mounted directly to `/usr/local/bin/pxset`, so it's runnable as a command: `source pxset set` / `source pxset unset` (must be sourced, or the exports only affect pxset's own subprocess) to manually toggle `HTTP_PROXY`/`HTTPS_PROXY`/`COMPOSE_HTTP_PROXY`/`COMPOSE_HTTPS_PROXY`. It must NOT be auto-sourced from the loader — it `exit`s when called with no argument, which would kill whatever shell sourced it. |
+| File | Purpose |
+|------|---------|
+| `pxset` | Manual proxy toggle: `source pxset set` / `source pxset unset` (must be sourced, or the exports only affect pxset's own subprocess) — reads `PROXY_HOST`/`PROXY_PORT` fresh from the bind-mounted `/etc/ping-linux.env`. It must NOT be auto-sourced — it `exit`s when called with no argument, which would kill whatever shell sourced it. |
 
-Both `10-proxy.sh` and `pxset` read `/etc/ping-linux.env` directly — the
-bind-mounted copy of your `.env` — not container environment variables. So
-editing `.env` on the host takes effect the moment you open a new shell,
-with no `docker compose up`/`down` and no rebuild. `PROXY_ACTIVE=true`/`false`
-is a genuine string comparison in these scripts (plain bash), not compose
-interpolation, so `false` really does mean off.
+Because these are individual bind mounts (not a whole-directory auto-loader
+anymore), editing `pxset` or adding a new command script takes effect
+immediately, no rebuild — you just have to remember to add a matching
+`volumes:` line in `docker-compose.yml` for anything new.
 
 ---
 
@@ -716,10 +767,11 @@ kind delete cluster        # tear down
 
 ## Appendix — auto-switch the proxy by network reachability
 
-This used to be a manual copy-paste snippet for `/root/.bashrc`. It's now
-wired in automatically as `config\pre-scripts\10-proxy.sh` — see
-[section 7b](#5b-pre-scripts). Every new shell re-checks whether
-`PROXY_HOST:PROXY_PORT` (from `.env`) answers within 1s and exports or unsets
-`HTTP_PROXY`/`HTTPS_PROXY` accordingly, automatically, for every user. For a
-manual on-demand toggle instead, use `pxset set` / `pxset unset`
-(`config\pre-scripts\pxset`, also covered in 7b).
+This used to be a manual copy-paste snippet for `/root/.bashrc`, then a
+bind-mounted `config\pre-scripts\10-proxy.sh`. It's now baked directly into
+the Dockerfile's `/etc/bash.bashrc` — see [section 7b](#5b-pre-scripts).
+Every new shell re-checks whether `PROXY_HOST:PROXY_PORT` (read live from
+`.env`) answers within 1s and exports or unsets `HTTP_PROXY`/`HTTPS_PROXY`
+accordingly, automatically, for every user. For a manual on-demand toggle
+instead, use `pxset set` / `pxset unset` (`config\pre-scripts\pxset`, also
+covered in 7b).

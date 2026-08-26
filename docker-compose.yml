@@ -27,9 +27,9 @@ services:
       # deliberately NOT set here. Anything in this block is baked in at
       # container creation — changing .env would then need `docker compose
       # up -d` (recreate) to take effect. Instead, .env is bind-mounted live
-      # (see volumes below) and read straight from disk by config/pre-scripts
-      # on every new shell — edit .env, open a shell, done. No rebuild, no
-      # up/down, ever required.
+      # (see volumes below) and read straight from disk by the Dockerfile's
+      # /etc/bash.bashrc proxy check on every new shell — edit .env, open a
+      # shell, done. No rebuild, no up/down, ever required.
       #
       # ---- CRITICAL: cluster + local traffic must bypass the proxy ----
       NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,kind-worker,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
@@ -42,13 +42,14 @@ services:
       - ./workspace:/root/source
       # Persist kubeconfig between restarts.
       - kube-config:/root/.kube
-      # The helper script, mounted as a command.
+      # ---- Custom shell commands: mount each one straight onto PATH, run
+      # explicitly during `docker exec` (e.g. `connect-kind`, `pxset set`).
+      # This is config/pre-scripts/'s job now — commands you invoke on
+      # demand, not scripts that auto-run. (TAB completion + the proxy
+      # safety net auto-run on every shell instead, baked into the
+      # Dockerfile's /etc/bash.bashrc — see there for why.)
       - ./config/connect-kind.sh:/usr/local/bin/connect-kind:ro
-      # Manual proxy toggle, mounted as a command: `pxset set` / `pxset unset`.
       - ./config/pre-scripts/pxset:/usr/local/bin/pxset:ro
-      # Auto-loaded for every user's shell (TAB completion, proxy safety
-      # net) via /etc/bash.bashrc, installed by the Dockerfile.
-      - ./config/pre-scripts:/etc/profile.d/pre-scripts:ro
       # Live config, read straight from disk (not baked into env at
       # container creation) — edit this file, no rebuild/up/down needed.
       - ./.env:/etc/ping-linux.env:ro

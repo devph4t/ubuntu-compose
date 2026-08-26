@@ -39,22 +39,25 @@ to `C:\Users\<you>\.wslconfig` — see MANUAL.md section 3 for why (cgroup v2).
 ├── .env                   gitignored — your proxy settings (see below)
 ├── .env.example           template for .env
 └── config\
-    ├── connect-kind.sh              wires kubectl to a freshly created kind cluster
+    ├── connect-kind.sh              wires kubectl to a freshly created kind cluster (run: `connect-kind`)
     ├── install-cluster-prereqs.sh   ServiceMonitor CRD + cert-manager + cert-issuer + accelerator
     ├── wslconfig.example             template for C:\Users\<you>\.wslconfig
     ├── environments\local\cert-manager-values.yaml
-    └── pre-scripts\                  auto-loaded for every user's shell (see below)
-        ├── 00-completions.sh   TAB completion: kubectl/helm/kind/kubectx/kubens/gcloud/pingcli
-        ├── 10-proxy.sh         reachability-checked proxy on/off, every new shell
-        └── pxset                manual toggle: `source pxset set` / `source pxset unset`
+    └── pre-scripts\
+        └── pxset   manual proxy toggle (run: `source pxset set` / `source pxset unset`)
 ```
+
+TAB completion and the proxy reachability check run automatically on every
+shell too, but they're baked directly into the Dockerfile's
+`/etc/bash.bashrc` (not bind-mounted) — `config\pre-scripts\` is reserved
+for commands you invoke explicitly, like `pxset` and `connect-kind`.
 
 ## Proxy configuration
 
 Edit `.env` (`PROXY_ACTIVE`, `PROXY_HOST`, `PROXY_PORT`) any time — it's
-bind-mounted straight into the running container and read fresh by
-`config\pre-scripts\` on every new shell. It never affects the image build
-and never requires `docker compose up`/`down` to take effect.
+bind-mounted straight into the running container and read fresh by the
+Dockerfile's baked-in proxy check on every new shell. It never affects the
+image build and never requires `docker compose up`/`down` to take effect.
 
 ## Daily commands
 

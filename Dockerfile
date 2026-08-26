@@ -124,20 +124,47 @@ RUN curl -sSL https://sdk.cloud.google.com > /tmp/install_gcloud.sh \
     && rm -f /tmp/install_gcloud.sh
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
-# ---- Shell: auto-load config/pre-scripts for EVERY user's shell ----
-# The scripts themselves (TAB completion, the proxy safety net, etc.) are
-# bind-mounted read-only at runtime from ./config/pre-scripts (see
-# docker-compose.yml), so they can be added/edited without rebuilding the
-# image. /etc/bash.bashrc is sourced by every interactive non-login bash
-# shell for every user (not just root's ~/.bashrc). Only *.sh files are
-# auto-sourced, in sorted order (00-, 10-, ... prefixes control ordering) —
-# non-.sh helpers like pxset are meant to be run manually, not sourced.
+# ---- Shell: baked-in TAB completion + proxy safety net, EVERY user's shell ----
+# This runs automatically on every `docker exec` shell, so it's baked into
+# the image at build time rather than sourced from a bind mount —
+# /etc/bash.bashrc is sourced by every interactive non-login bash shell for
+# every user (not just root's ~/.bashrc). The proxy check below still reads
+# live values from the bind-mounted .env (/etc/ping-linux.env, see
+# docker-compose.yml) on each new shell, so `.env` edits still take effect
+# without a rebuild — only the completion/reachability-check CODE is fixed
+# at build time, not the proxy values themselves.
+#
+# config/pre-scripts/ is for the opposite case: commands you invoke
+# explicitly during `docker exec` (e.g. `pxset set`), not auto-run scripts —
+# see pxset, mounted straight to /usr/local/bin/pxset in docker-compose.yml.
 RUN printf '%s\n' \
-    '# Auto-load every *.sh in config/pre-scripts (bind-mounted, all users).' \
-    'if [ -d /etc/profile.d/pre-scripts ]; then' \
-    '  for f in /etc/profile.d/pre-scripts/*.sh; do' \
-    '    [ -f "$f" ] && source "$f"' \
-    '  done' \
+    '# ---- TAB completion (kubectl/helm/kind/kubectx/kubens/gcloud/pingcli) ----' \
+    'source /usr/share/bash-completion/bash_completion 2>/dev/null || true' \
+    'alias k=kubectl' \
+    'source <(kubectl completion bash) 2>/dev/null || true' \
+    'complete -o default -F __start_kubectl k 2>/dev/null || true' \
+    'source <(helm completion bash) 2>/dev/null || true' \
+    'source <(kind completion bash) 2>/dev/null || true' \
+    'source /opt/kubectx/completion/kubectx.bash 2>/dev/null || true' \
+    'source /opt/kubectx/completion/kubens.bash 2>/dev/null || true' \
+    'command -v pingcli >/dev/null 2>&1 && source <(pingcli completion bash) 2>/dev/null || true' \
+    '[ -f /root/google-cloud-sdk/completion.bash.inc ] && source /root/google-cloud-sdk/completion.bash.inc' \
+    '' \
+    '# ---- Proxy safety net: reads PROXY_ACTIVE/PROXY_HOST/PROXY_PORT live' \
+    '# from the bind-mounted .env (/etc/ping-linux.env) on every new shell,' \
+    '# and only enables the proxy if it answers within 1s.' \
+    'if [ -f /etc/ping-linux.env ]; then' \
+    '  set -a' \
+    '  source /etc/ping-linux.env' \
+    '  set +a' \
+    'fi' \
+    'if [ "${PROXY_ACTIVE:-}" = "true" ] && [ -n "${PROXY_HOST:-}" ] \' \
+    '   && curl -s -m 1 -o /dev/null "http://${PROXY_HOST}:${PROXY_PORT}"; then' \
+    '  export HTTP_PROXY="http://${PROXY_HOST}:${PROXY_PORT}/"' \
+    '  export HTTPS_PROXY="$HTTP_PROXY"' \
+    '  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"' \
+    'else' \
+    '  unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy' \
     'fi' \
     >> /etc/bash.bashrc
 
