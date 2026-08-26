@@ -15,6 +15,14 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
+if [ "$1" == "set" ] && [ -z "${PROXY_HOST:-}" ]; then
+  echo "PROXY_HOST is not set — no /etc/ping-linux.env mounted (or it's blank)." >&2
+  echo "This image can run standalone (e.g. loaded from a shared .tar), so" >&2
+  echo "there's no default proxy to fall back to. Set PROXY_HOST/PROXY_PORT" >&2
+  echo "yourself first, e.g.: export PROXY_HOST=10.4.7.4 PROXY_PORT=8080" >&2
+  exit 1
+fi
+
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}/"
 
 if [ "$1" == "set" ]; then

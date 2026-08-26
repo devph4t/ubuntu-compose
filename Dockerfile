@@ -124,6 +124,19 @@ RUN curl -sSL https://sdk.cloud.google.com > /tmp/install_gcloud.sh \
     && rm -f /tmp/install_gcloud.sh
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
+# ---- Bake in the custom commands (connect-kind, pxset) ----
+# This image is meant to be portable — `docker save`d to a .tar and shared
+# to another PC that won't have this repo's config/ folder or
+# docker-compose.yml around — so these can't rely solely on bind mounts.
+# COPY them straight into the image. When you DO run it through this
+# repo's docker-compose.yml, its bind mounts (see volumes:) shadow these
+# same paths, so local edits to config/connect-kind.sh or
+# config/pre-scripts/pxset still take effect without a rebuild — this COPY
+# only matters once the image is loaded standalone, elsewhere.
+COPY config/connect-kind.sh /usr/local/bin/connect-kind
+COPY config/pre-scripts/pxset /usr/local/bin/pxset
+RUN chmod +x /usr/local/bin/connect-kind /usr/local/bin/pxset
+
 # ---- Shell: baked-in TAB completion + proxy safety net, EVERY user's shell ----
 # This runs automatically on every `docker exec` shell, so it's baked into
 # the image at build time rather than sourced from a bind mount —
@@ -132,11 +145,9 @@ ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 # live values from the bind-mounted .env (/etc/ping-linux.env, see
 # docker-compose.yml) on each new shell, so `.env` edits still take effect
 # without a rebuild — only the completion/reachability-check CODE is fixed
-# at build time, not the proxy values themselves.
-#
-# config/pre-scripts/ is for the opposite case: commands you invoke
-# explicitly during `docker exec` (e.g. `pxset set`), not auto-run scripts —
-# see pxset, mounted straight to /usr/local/bin/pxset in docker-compose.yml.
+# at build time, not the proxy values themselves. On a standalone/shared
+# copy of this image with no .env mounted, the proxy simply stays off (the
+# `if [ -f /etc/ping-linux.env ]` guard below skips cleanly).
 RUN printf '%s\n' \
     '# ---- TAB completion (kubectl/helm/kind/kubectx/kubens/gcloud/pingcli) ----' \
     'source /usr/share/bash-completion/bash_completion 2>/dev/null || true' \

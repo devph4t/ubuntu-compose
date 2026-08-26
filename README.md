@@ -52,6 +52,25 @@ shell too, but they're baked directly into the Dockerfile's
 `/etc/bash.bashrc` (not bind-mounted) — `config\pre-scripts\` is reserved
 for commands you invoke explicitly, like `pxset` and `connect-kind`.
 
+## Sharing the image
+
+The image is fully self-contained: every CLI, TAB completion, and the
+`connect-kind`/`pxset` commands are baked in at build time (not left
+depending on this repo's `config\` folder being present). Export it and
+hand it to another PC with no repo checkout required:
+
+```powershell
+docker save my_wsl_ubuntu:26.04 -o my_wsl_ubuntu_26.04.tar
+# on the other PC:
+docker load -i my_wsl_ubuntu_26.04.tar
+```
+
+`.env` (proxy settings) and the `workspace`/`kube-config` mounts are
+deliberately left out of the image — they're host-specific data, not
+tooling. See [MANUAL.md section 7c](MANUAL.md#5c-portable-image) for the
+full standalone `docker run` command and what you get with vs. without the
+rest of the repo.
+
 ## Proxy configuration
 
 Edit `.env` (`PROXY_ACTIVE`, `PROXY_HOST`, `PROXY_PORT`) any time — it's

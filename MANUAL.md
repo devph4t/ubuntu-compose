@@ -33,6 +33,7 @@ Your Windows username in the examples is `2521183489`. Change it if different.
 6. [File 3 — `docker-compose.yml` (full code)](#4-file-docker-compose)
 7. [File 4 — `connect-kind.sh` (full code)](#5-file-connect-kind)
 7b. [Baked-in auto-run vs. `config\pre-scripts\` on-demand commands](#5b-pre-scripts)
+7c. [Sharing the image — `docker save`/`docker load`](#5c-portable-image)
 8. [Step-by-step from the start](#6-steps)
 9. [Cluster prerequisites for Ping charts (ServiceMonitor / cert-manager)](#6b-prereqs)
 10. [Troubleshooting table](#7-troubleshooting)
@@ -295,6 +296,19 @@ RUN curl -sSL https://sdk.cloud.google.com > /tmp/install_gcloud.sh \
     && rm -f /tmp/install_gcloud.sh
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
+# ---- Bake in the custom commands (connect-kind, pxset) ----
+# This image is meant to be portable — `docker save`d to a .tar and shared
+# to another PC that won't have this repo's config/ folder or
+# docker-compose.yml around — so these can't rely solely on bind mounts.
+# COPY them straight into the image. When you DO run it through this
+# repo's docker-compose.yml, its bind mounts (see volumes:) shadow these
+# same paths, so local edits to config/connect-kind.sh or
+# config/pre-scripts/pxset still take effect without a rebuild — this COPY
+# only matters once the image is loaded standalone, elsewhere.
+COPY config/connect-kind.sh /usr/local/bin/connect-kind
+COPY config/pre-scripts/pxset /usr/local/bin/pxset
+RUN chmod +x /usr/local/bin/connect-kind /usr/local/bin/pxset
+
 # ---- Shell: baked-in TAB completion + proxy safety net, EVERY user's shell ----
 # This runs automatically on every `docker exec` shell, so it's baked into
 # the image at build time rather than sourced from a bind mount —
@@ -303,7 +317,9 @@ ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 # values from the bind-mounted .env (/etc/ping-linux.env, see
 # docker-compose.yml) on each new shell, so .env edits still take effect
 # without a rebuild — only the completion/reachability-check CODE is fixed
-# at build time, not the proxy values themselves. See section 7b.
+# at build time, not the proxy values themselves. On a standalone/shared
+# copy of this image with no .env mounted, the proxy simply stays off (the
+# `if [ -f /etc/ping-linux.env ]` guard skips cleanly). See section 7b.
 #
 # config/pre-scripts/ is for the opposite case: commands you invoke
 # explicitly during `docker exec` (e.g. `pxset set`), not auto-run scripts.
@@ -499,18 +515,53 @@ set -euo pipefail
 
 CLUSTER="${1:-kind}"
 CONTAINER="my-ubuntu-vm"     # docker container_name from docker-compose.yml
+TARGET="/root/.kube/config"
 
 mkdir -p /root/.kube
+
+# If $KUBECONFIG is already exported to something else, every kubectl
+# command in THIS shell will keep reading that stale file even after we
+# fix $TARGET below — a bad env var elsewhere (e.g. left over from
+# manually following the KUBECONFIG troubleshooting tip) reproduces the
+# exact "couldn't get current server API group list" / stale
+# 127.0.0.1:<port> error even though the real kubeconfig is correct.
+if [ -n "${KUBECONFIG:-}" ] && [ "${KUBECONFIG}" != "${TARGET}" ]; then
+  echo "warning: \$KUBECONFIG is set to '${KUBECONFIG}', not ${TARGET}." >&2
+  echo "         Every kubectl command in this shell will keep using that" >&2
+  echo "         file instead of the one connect-kind is about to fix." >&2
+  echo "         Run: unset KUBECONFIG   (or open a new shell)" >&2
+fi
 
 # Attach this container to kind's network so 'kind-control-plane' resolves.
 docker network connect kind "${CONTAINER}" 2>/dev/null || true
 
-# Write a kubeconfig that targets the in-network API server address.
-kind get kubeconfig --name "${CLUSTER}" --internal > /root/.kube/config
+# Write to a temp file first — if `kind get kubeconfig` fails, a plain
+# `> $TARGET` would still truncate $TARGET to empty (bash opens/truncates
+# the redirect target before running the command), destroying a
+# previously-working kubeconfig even though `set -e` catches the failure.
+TMP="$(mktemp)"
+if ! kind get kubeconfig --name "${CLUSTER}" --internal > "$TMP"; then
+  rm -f "$TMP"
+  echo "error: 'kind get kubeconfig --name ${CLUSTER} --internal' failed (see above)." >&2
+  echo "       ${TARGET} was left untouched." >&2
+  exit 1
+fi
+mv "$TMP" "$TARGET"
 
-echo "kubeconfig written to /root/.kube/config"
+echo "kubeconfig written to ${TARGET}"
 echo "Testing connection..."
-kubectl get nodes
+export KUBECONFIG="$TARGET"
+
+# The API server can take a moment to become reachable over the internal
+# network path right after cluster creation — retry briefly instead of
+# failing on the very first attempt.
+for i in 1 2 3 4 5; do
+  if kubectl get nodes; then
+    exit 0
+  fi
+  [ "$i" -lt 5 ] && { echo "not ready yet, retrying ($i/5)..." >&2; sleep 2; }
+done
+exit 1
 ```
 
 ---
@@ -558,18 +609,68 @@ fi
 (Full version in the Dockerfile listing, section 4.)
 
 **Invoke on demand — `config\pre-scripts\`.** Anything you want to run as an
-explicit command during `docker exec` (not auto-sourced) goes here, mounted
-straight onto `PATH` in `docker-compose.yml` — the same pattern as
-`connect-kind.sh`. Today that's:
+explicit command during `docker exec` (not auto-sourced) goes here, and is
+wired in TWICE, on purpose:
+
+1. `COPY`'d into the image in the Dockerfile (`/usr/local/bin/<name>`) — so
+   the command works even if this image is shared standalone (see 7c).
+2. Bind-mounted onto the same path in `docker-compose.yml` — so when you run
+   it through this repo normally, the bind mount shadows the baked-in copy
+   and local edits take effect immediately, no rebuild.
+
+Today that's:
 
 | File | Purpose |
 |------|---------|
-| `pxset` | Manual proxy toggle: `source pxset set` / `source pxset unset` (must be sourced, or the exports only affect pxset's own subprocess) — reads `PROXY_HOST`/`PROXY_PORT` fresh from the bind-mounted `/etc/ping-linux.env`. It must NOT be auto-sourced — it `exit`s when called with no argument, which would kill whatever shell sourced it. |
+| `connect-kind.sh` | Wires kubectl to a freshly created kind cluster — run as `connect-kind`. Covered in full in section 7. |
+| `pxset` | Manual proxy toggle: `source pxset set` / `source pxset unset` (must be sourced, or the exports only affect pxset's own subprocess) — reads `PROXY_HOST`/`PROXY_PORT` fresh from the bind-mounted `/etc/ping-linux.env`. It must NOT be auto-sourced — it `exit`s when called with no argument, which would kill whatever shell sourced it. If `PROXY_HOST` isn't set (no `.env` mounted — e.g. a standalone/shared copy of this image), `pxset set` fails loudly with a clear message instead of silently building a broken `http://:/` URL. |
 
-Because these are individual bind mounts (not a whole-directory auto-loader
-anymore), editing `pxset` or adding a new command script takes effect
-immediately, no rebuild — you just have to remember to add a matching
-`volumes:` line in `docker-compose.yml` for anything new.
+Adding a new command script means both a `COPY`+`chmod` line in the
+Dockerfile AND a matching bind-mount line in `docker-compose.yml`'s
+`volumes:` — miss the second one and it still works standalone, just not
+live-editable during local dev.
+
+---
+
+<a name="5c-portable-image"></a>
+## 7c. Sharing the image — `docker save` / `docker load`
+
+Everything above is intentionally designed so this image is self-contained
+once built: all CLIs, TAB completion, and the `connect-kind`/`pxset`
+commands are baked in via `RUN`/`COPY`, not left dependent on this repo's
+`config\` folder or `docker-compose.yml` being present on the machine that
+runs it. What's deliberately **not** baked in — because it's inherently
+host/environment-specific data, not tooling — is `.env` (your proxy
+settings) and the `workspace`/`kube-config` bind mounts.
+
+Export it:
+```powershell
+docker compose build
+docker save my_wsl_ubuntu:26.04 -o my_wsl_ubuntu_26.04.tar
+```
+
+On the other PC (no repo checkout needed at all — this alone gives you a
+fully working shell with every CLI, TAB completion, `connect-kind`, and
+`pxset`):
+```powershell
+docker load -i my_wsl_ubuntu_26.04.tar
+docker run -d --name my-ubuntu-vm --hostname ubuntu-dev `
+  -v /var/run/docker.sock:/var/run/docker.sock `
+  my_wsl_ubuntu:26.04
+docker exec -it my-ubuntu-vm bash
+```
+
+To get the full experience (live `.env` proxy config, `kind`
+cluster-creation via the host's Docker socket, a persisted kubeconfig, your
+project files under `/root/source`), copy this whole repo over instead and
+use `docker compose up -d` as normal — `docker load` just guarantees the
+image itself always has everything installed, regardless of which machine
+runs it.
+
+`my_wsl_ubuntu_26.04.tar` is sizeable (image with the full toolchain) —
+`.gitignore` already excludes `*.tar` so it never ends up in version
+control; share it by whatever out-of-band means you'd use for a large binary
+(network share, USB, etc.).
 
 ---
 
@@ -702,6 +803,7 @@ only needed for non-local environments).
 | `docker info` still `Cgroup Version: 1` after edit | typo `kelnelCommandLine`, or no `wsl --shutdown` | fix spelling to `kernelCommandLine`, shut down again |
 | `kind` gives `syntax error near '<'` / XML | URL typo `lastest` → 404 saved as the binary | use `latest` |
 | `connection to the server localhost:8080 refused` | no kubeconfig in container | run `connect-kind` (Step 4) |
+| `couldn't get current server API group list ... 127.0.0.1:<port>` **even after running `connect-kind`** | `$KUBECONFIG` is exported to some other file in that shell — `connect-kind` correctly rewrites `/root/.kube/config`, but your shell keeps reading the stale one | `unset KUBECONFIG`, or open a new shell. `connect-kind` now warns about this itself (and its own internal check always uses the right file, so its own output can be trusted even if this warning fires). |
 | `dial tcp: lookup kind-control-plane ... no such host` | container not on kind's network | `docker network connect kind my-ubuntu-vm` then rewrite kubeconfig |
 | `No such container: ubuntu-dev` on network connect | used `hostname`, not the docker name | use `my-ubuntu-vm` (the `container_name`) |
 | `sed: cannot rename ... Device or resource busy` | editing a read-only mounted file in place | re-save the source file as LF on Windows instead |
