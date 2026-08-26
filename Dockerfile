@@ -23,6 +23,21 @@ WORKDIR /root/source
 #   python3 (+pip/venv/dev)             : scripts & tooling
 #   jose                                : JOSE/JWT CLI used by ping scripts
 #   iproute2/iputils-ping/dnsutils/...  : docker network + DNS debugging
+#
+# PingAM/PingIDM/Ping Platform UI/ForgeRock Directory Server (token-store,
+# user-store) are NOT apt packages — they're deployed as Kubernetes
+# workloads via the Helm charts this repo installs (see
+# config/install-cluster-prereqs.sh and MANUAL.md section 9). What follows
+# is the CLI tooling to talk to those services once they're running in
+# the cluster:
+#   ldap-utils      : ldapsearch/ldapmodify/ldapwhoami/ldapdelete against
+#                      ForgeRock Directory Server (DS/OpenDJ) — AM's CTS
+#                      (token-store) and IDM's repo (user-store) when
+#                      backed by DS.
+#   postgresql-client : psql/pg_dump/pg_restore against IDM's repo when
+#                      backed by PostgreSQL (the ForgeOps default).
+#   openssl         : cert/keystore/mTLS debugging between AM, IDM, DS,
+#                      and the Ping Platform UI's ingress.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl wget ca-certificates gnupg lsb-release git vim jq unzip zip tar \
       bash-completion openssh-client \
@@ -31,6 +46,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv python3-dev \
       jose \
       iproute2 iputils-ping dnsutils net-tools netcat-openbsd telnet traceroute \
+      ldap-utils postgresql-client openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Classic developer tooling ----
+#   less/nano/tree/htop/tmux : everyday shell tools
+#   ripgrep/fd-find          : fast search (rg, and fd — see the symlink below)
+#   locales/man-db/procps/lsof/rsync/patch/file/sudo : general Unix staples
+#   git-lfs                  : large-file git support
+#   python-is-python3/pipx   : `python` on PATH, isolated CLI tool installs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      less nano tree htop tmux ripgrep fd-find \
+      locales man-db procps lsof rsync patch file sudo \
+      git-lfs python-is-python3 pipx \
+    && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Node.js 22 LTS (+ npm, yarn) ----

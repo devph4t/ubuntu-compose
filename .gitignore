@@ -1,3 +1,41 @@
+# ---- Project-specific ----
 /workspace
-
 .env
+
+# ---- Archives / image exports / backups ----
+# e.g. `docker save my_wsl_ubuntu:26.04 -o my_wsl_ubuntu_26.04.tar`
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.tar.xz
+*.txz
+*.tar.zst
+*.zip
+*.7z
+*.rar
+*.gz
+*.bz2
+*.xz
+*.bak
+*.orig
+*.old
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs / local tool state ----
+*.log
+.claude/settings.local.json
+.claude/*.lock
+.claude/tasks/
