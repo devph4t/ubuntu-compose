@@ -1,0 +1,25 @@
+# =====================================================================
+#  Copy this file to:  C:\Users\<you>\.wslconfig
+#  (leading dot, no .txt extension). No administrator rights needed —
+#  it lives in your own user folder. See MANUAL.md section 3.
+#
+#  This controls the single WSL2 VM that Docker Desktop also runs
+#  inside, so it applies even though you never boot a WSL distro
+#  yourself.
+# =====================================================================
+
+[wsl2]
+memory=20GB
+processors=12
+
+# The important line: force the WSL2 kernel to use cgroup v2.
+# kind + modern Kubernetes REQUIRE cgroup v2. Docker on cgroup v1 is
+# why `kind create cluster` fails with a cgroup symlink error.
+#
+# EXACT spelling matters: kernelCommandLine  (k-e-r-n-e-l)
+kernelCommandLine = cgroup_no_v1=all
+
+# If, after `wsl --shutdown` + restart, `docker info` still shows
+# `Cgroup Version: 1`, comment out the line above and use this one
+# instead, then restart again:
+# kernelCommandLine = systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all

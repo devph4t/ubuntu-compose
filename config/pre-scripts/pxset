@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Manual proxy toggle. Reads PROXY_HOST/PROXY_PORT LIVE from the
+# bind-mounted .env (/etc/ping-linux.env), so editing .env on the host
+# takes effect immediately — no rebuild, no docker compose up/down.
+# For automatic (reachability-based) switching, see 10-proxy.sh instead.
+#
+# Usage: `source pxset set` / `source pxset unset` — run plainly (`pxset
+# set`) the exports only affect pxset's own subprocess, not your shell.
+
+ENV_FILE="/etc/ping-linux.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
+PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}/"
+
+if [ "$1" == "set" ]; then
+  echo "Setting proxy for docker daemon..."
+  export HTTP_PROXY="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+  echo "HTTP_PROXY=$HTTP_PROXY"
+  echo "HTTPS_PROXY=$HTTPS_PROXY"
+  echo "Setting proxy for docker-compose..."
+  export COMPOSE_HTTP_PROXY="$PROXY_URL"
+  export COMPOSE_HTTPS_PROXY="$PROXY_URL"
+  echo "COMPOSE_HTTP_PROXY=$COMPOSE_HTTP_PROXY"
+  echo "COMPOSE_HTTPS_PROXY=$COMPOSE_HTTPS_PROXY"
+elif [ "$1" == "unset" ]; then
+  echo "Unsetting proxy for docker daemon..."
+  unset HTTP_PROXY
+  unset HTTPS_PROXY
+  echo "HTTP_PROXY=$HTTP_PROXY"
+  echo "HTTPS_PROXY=$HTTPS_PROXY"
+  echo "Unsetting proxy for docker-compose..."
+  unset COMPOSE_HTTP_PROXY
+  unset COMPOSE_HTTPS_PROXY
+  echo "COMPOSE_HTTP_PROXY=$COMPOSE_HTTP_PROXY"
+  echo "COMPOSE_HTTPS_PROXY=$COMPOSE_HTTPS_PROXY"
+else
+  echo "Usage: $0 {set|unset}"
+  exit 1
+fi
+
+echo "Proxy settings updated successfully."
+echo "Current proxy settings:"
+echo "HTTP_PROXY=$HTTP_PROXY"
+echo "HTTPS_PROXY=$HTTPS_PROXY"

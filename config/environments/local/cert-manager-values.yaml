@@ -1,0 +1,12 @@
+# Referenced by MANUAL.md section 9 as:
+#   helm upgrade --install cert-manager jetstack/cert-manager \
+#     --values environments/${ENV_NAME}/cert-manager-values.yaml
+#
+# MANUAL.md does not define this file's contents — it's a placeholder.
+# Fill in overrides for the jetstack/cert-manager chart here, e.g.:
+#
+# installCRDs: false   # CRDs are installed separately via --set crds.enabled=true
+# resources:
+#   requests:
+#     cpu: 10m
+#     memory: 32Mi

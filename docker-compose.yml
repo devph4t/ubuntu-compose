@@ -1,0 +1,60 @@
+services:
+  ubuntu-dev:
+    build:
+      context: .
+      # No proxy args here on purpose — .env must never affect the image
+      # build. If you ever need a one-off proxied build, pass it manually:
+      #   docker compose build --build-arg HTTP_PROXY=http://host:port/ --build-arg HTTPS_PROXY=http://host:port/
+    image: my_wsl_ubuntu:26.04
+    container_name: my-ubuntu-vm
+    hostname: ubuntu-dev
+    command: ["tail", "-f", "/dev/null"]   # keeps the "VM" running
+    working_dir: /root/source
+
+    # RAM / CPU limits for the container itself (the WSL2 VM overall is
+    # capped by .wslconfig at 20GB / 12 cores). Sourced from .env
+    # (VM_MEMORY/VM_CPUS) — these are container-creation attributes, so
+    # unlike the proxy settings a change here DOES need `docker compose
+    # up -d` (recreate) to take effect, not just a new shell.
+    deploy:
+      resources:
+        limits:
+          memory: "${VM_MEMORY}"
+          cpus: "${VM_CPUS}"
+
+    environment:
+      # NOTE: proxy vars (HTTP_PROXY/PROXY_ACTIVE/PROXY_HOST/PROXY_PORT) are
+      # deliberately NOT set here. Anything in this block is baked in at
+      # container creation — changing .env would then need `docker compose
+      # up -d` (recreate) to take effect. Instead, .env is bind-mounted live
+      # (see volumes below) and read straight from disk by config/pre-scripts
+      # on every new shell — edit .env, open a shell, done. No rebuild, no
+      # up/down, ever required.
+      #
+      # ---- CRITICAL: cluster + local traffic must bypass the proxy ----
+      NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,kind-worker,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
+      no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,kind-worker,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
+
+    volumes:
+      # Talk to the host Docker daemon (docker-outside-of-docker).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Your project folder, editable from both Windows and the container.
+      - ./workspace:/root/source
+      # Persist kubeconfig between restarts.
+      - kube-config:/root/.kube
+      # The helper script, mounted as a command.
+      - ./config/connect-kind.sh:/usr/local/bin/connect-kind:ro
+      # Manual proxy toggle, mounted as a command: `pxset set` / `pxset unset`.
+      - ./config/pre-scripts/pxset:/usr/local/bin/pxset:ro
+      # Auto-loaded for every user's shell (TAB completion, proxy safety
+      # net) via /etc/bash.bashrc, installed by the Dockerfile.
+      - ./config/pre-scripts:/etc/profile.d/pre-scripts:ro
+      # Live config, read straight from disk (not baked into env at
+      # container creation) — edit this file, no rebuild/up/down needed.
+      - ./.env:/etc/ping-linux.env:ro
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  kube-config:
