@@ -37,6 +37,7 @@ Your Windows username in the examples is `2521183489`. Change it if different.
 8. [Step-by-step from the start](#6-steps)
 9. [Cluster prerequisites for Ping charts (ServiceMonitor / cert-manager)](#6b-prereqs)
 9b. [Local image registry — fast kind image loads](#6b-prereqs-registry)
+9c. [Ingress — reachable from Windows and the kind network](#6c-ingress)
 10. [Troubleshooting table](#7-troubleshooting)
 11. [Fallback if cgroup v2 is blocked (k3d)](#8-fallback)
 12. [Daily cheat sheet](#9-cheatsheet)
@@ -87,6 +88,7 @@ ubuntu\
 │   ├── connect-registry.sh ← mounted onto PATH, run explicitly: `connect-registry`
 │   ├── kind-config.yaml  ← `kind create cluster --config /root/config/kind-config.yaml`
 │   ├── fix-and-run.sh    ← one-shot: CRLF fix + install-cluster-prereqs.sh + accelerator upgrade
+│   ├── open-edge.bat     ← offline-PC domain workaround, no hosts-file/admin needed — see 9c
 │   ├── wslconfig.example
 │   ├── install-cluster-prereqs.sh
 │   ├── environments\local\cert-manager-values.yaml
@@ -125,6 +127,14 @@ differently on purpose:
   blank; the image also bakes that same default into `tzdata` at build
   time, so a standalone/shared copy of the image (no `.env` mounted) still
   comes up on Thailand time.
+- `INGRESS_DOMAIN` is **not** consumed by `docker-compose.yml`/`Dockerfile`
+  at all — it's a plain shell variable for you, exported into every
+  container shell the same way (`.env` is `source`d automatically). Pass it
+  into whatever Helm install sets your ingress domain/FQDN. Defaults to the
+  wildcard `127.0.0.1.nip.io` (any subdomain resolves to `127.0.0.1`, no
+  admin-rights hosts-file edit needed) — see section 9c / README.md's
+  Ingress section for the full picture, including what `config/kind-config.yaml`
+  does to make it reachable from Windows.
 
 And one file goes in your **user home**, not the project folder (copy it from
 `config/wslconfig.example`):
@@ -881,6 +891,57 @@ repeatedly across a session.
 
 ---
 
+<a name="6c-ingress"></a>
+## 9c. Ingress — reachable from Windows AND from inside the kind network
+
+`config/kind-config.yaml`'s `nodes:` block labels the control-plane
+`ingress-ready=true` and publishes ports 80/443 from that node straight
+through to the Docker host — the standard [kind + ingress-nginx
+recipe](https://kind.sigs.k8s.io/docs/user/ingress/). Because Docker Desktop
+forwards published container ports to Windows, `http(s)://localhost` (or any
+hostname resolving to `127.0.0.1`) reaches the ingress controller directly
+from a Windows browser — no `docker-compose.yml` port mapping needed for
+that. `ubuntu-dev` and every pod can already reach the controller over the
+`kind` docker network regardless of this port mapping (that's just ordinary
+in-cluster/sibling-container networking) — the mapping is only what adds
+Windows-browser access on top.
+
+That only opens the door on the node side. The ingress controller install
+itself — whatever chart `workspace/` deploys (e.g. `ingress-nginx-tls`) —
+still needs to be configured to actually bind those ports:
+- `nodeSelector: {ingress-ready: "true"}` so its pods schedule onto that node
+- `hostPort`/`hostNetwork` enabled on 80/443 (check the chart's
+  `values.yaml`; for stock `ingress-nginx` this is
+  `controller.hostPort.enabled=true`)
+
+**Domain:** `.env`'s `INGRESS_DOMAIN` (default `127.0.0.1.nip.io`) is a
+wildcard domain — any subdomain of it resolves to `127.0.0.1` via public
+DNS, e.g. `login.127.0.0.1.nip.io` and `admin.127.0.0.1.nip.io` both just
+work, no hosts-file edit. That matters for ForgeOps/Ping-style setups that
+need distinct per-service hostnames (SSO cookie-domain scoping). It's not
+read by `docker-compose.yml`/the `Dockerfile` — it's for you to pass into
+whichever Helm flag sets your chart's domain/FQDN (check
+`workspace/ia-ext-ciam`'s `values.yaml` for the exact key) — but it IS
+already exported as a plain `$INGRESS_DOMAIN` shell variable in every
+container shell, same mechanism as `PROXY_*` (`.env` is bind-mounted and
+`source`d automatically — section 7b).
+
+If nip.io's DNS is blocked on your network, set `INGRESS_DOMAIN` to a real
+domain and add matching entries to the Windows hosts file yourself instead
+— that path needs admin rights, unlike the nip.io default.
+
+**Fully offline PC** (e.g. it only has the `docker load`-ed shared image,
+per section 7c — no internet at all): nip.io needs real DNS the same way a
+hosts-file entry needs admin rights, so neither works there. Copy
+`config/open-edge.bat` over with the image instead and run it (`open-edge.bat
+mydomain.local` for a custom domain, default `ping.local`) — it opens Edge
+with `--host-resolver-rules` mapping `*.<domain>` to `127.0.0.1` inside the
+browser itself, before any DNS lookup, no admin rights and no system file
+touched. Set that PC's own `.env` `INGRESS_DOMAIN` to match the domain you
+pass it.
+
+---
+
 <a name="7-troubleshooting"></a>
 ## 10. Troubleshooting (the exact errors seen)
 
@@ -901,6 +962,8 @@ repeatedly across a session.
 | `bash: $'\r': command not found` right after `docker compose exec ubuntu-dev bash` | Not a repo/file issue — `/etc/bash.bashrc` is generated LF-clean at build time regardless of host OS (verify: `docker compose exec ubuntu-dev bash -c 'cat -A /etc/bash.bashrc \| grep -c "\^M\$"'` should print `0`). Confirmed cause: Git for Windows' bundled `bash.exe` (GNU bash via MSYS2) doesn't allocate a proper pty for `docker exec` on its own. | Prefix with `winpty`: `winpty docker compose exec ubuntu-dev bash`. Or run the same command from PowerShell / Windows Terminal instead of Git Bash. |
 | helm `curl ... githubusercontent.com` fails | incomplete URL | `https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3` |
 | `kind load docker-image` looks frozen on a large image; `docker stats` shows the kind node's CPU pegged but nothing progresses | single-threaded `docker save`/tar-import pipeline — more CPU doesn't parallelize it, and `VM_CPUS` doesn't even apply to the sibling kind node container | use the local registry instead (section 9b): `docker build -t myapp:dev .` then `kind-push myapp:dev` |
+| `kind create cluster --config config/kind-config.yaml` fails to bind port 80/443 | something else on Windows already owns that port (IIS, Skype, another local dev server) | free the port, or change the `hostPort` values in `config/kind-config.yaml` (section 9c) and use that port instead of 80/443 when browsing |
+| Ingress reachable via `kubectl`/inside the cluster but not from a Windows browser | `kind-config.yaml`'s port mapping only opens the door — the ingress controller chart itself also needs `nodeSelector: {ingress-ready: "true"}` and `hostPort`/`hostNetwork` enabled on 80/443 | check the chart's `values.yaml` (section 9c) |
 
 Deeper diagnosis if control-plane still won't start:
 ```bash

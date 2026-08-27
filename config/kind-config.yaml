@@ -13,6 +13,17 @@
 #   docker build -t localhost:5000/name:tag .
 #   docker push localhost:5000/name:tag
 #   # reference localhost:5000/name:tag in your pod/values — no load step
+#
+# ---- Ingress (80/443 reachable from the Windows host) ----
+# `nodes:` below labels the control-plane `ingress-ready=true` and publishes
+# 80/443 straight through to the Docker host — the standard kind+ingress-nginx
+# recipe (https://kind.sigs.k8s.io/docs/user/ingress/). ubuntu-dev and any
+# other pod can already reach the ingress over the "kind" docker network
+# without this; this part is only what makes it reachable from a browser on
+# Windows too. Point your ingress-nginx install's controller at this
+# (nodeSelector ingress-ready=true, hostNetwork or hostPort 80/443 — check
+# how workspace's chart configures the controller) and see .env's
+# INGRESS_DOMAIN for the hostname(s) to browse to.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 containerdConfigPatches:
@@ -24,3 +35,18 @@ containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
       endpoint = ["http://kind-registry:5000"]
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

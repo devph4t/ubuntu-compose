@@ -55,6 +55,7 @@ to `C:\Users\<you>\.wslconfig` — see MANUAL.md section 3 for why (cgroup v2).
     ├── kind-config.yaml              kind cluster config — pulls images through the local registry
     ├── fix-and-run.sh                fixes CRLF under workspace/ + runs install-cluster-prereqs.sh + the accelerator upgrade
     ├── install-cluster-prereqs.sh   ServiceMonitor CRD + cert-manager + cert-issuer + accelerator
+    ├── open-edge.bat                 opens Edge with a DNS-free domain override, for offline PCs (no hosts-file access)
     ├── wslconfig.example             template for C:\Users\<you>\.wslconfig
     ├── environments\local\cert-manager-values.yaml
     └── pre-scripts\
@@ -108,6 +109,61 @@ docker build -t myapp:dev .
 kind-push myapp:dev            # tags + pushes to localhost:5000/myapp:dev
 # reference localhost:5000/myapp:dev in your pod/values — no `kind load` step
 ```
+
+## Ingress (reachable from a Windows browser)
+
+`config/kind-config.yaml` also labels the control-plane node
+`ingress-ready=true` and publishes ports 80/443 from that node straight
+through to the Docker host — the standard [kind + ingress-nginx
+recipe](https://kind.sigs.k8s.io/docs/user/ingress/). Since Docker Desktop
+forwards published container ports to Windows itself, `http(s)://localhost`
+(or any hostname that resolves to `127.0.0.1`) reaches the ingress
+controller directly, no extra `docker-compose.yml` port mapping needed.
+`ubuntu-dev` and any pod can already reach it over the `kind` docker network
+regardless of this — this part is only what makes it reachable from a
+browser on Windows too.
+
+Two things the ingress controller install itself (whatever chart
+`workspace/` deploys — e.g. `ingress-nginx-tls`) needs to actually bind
+those ports, since `kind-config.yaml` only opens the door:
+- `nodeSelector: {ingress-ready: "true"}` so its pods land on that node
+- `hostPort`/`hostNetwork` enabled on 80/443 (check the chart's
+  `values.yaml` for the exact keys — for stock `ingress-nginx` it's
+  `controller.hostPort.enabled=true`)
+
+**Domain:** `.env`'s `INGRESS_DOMAIN` (default `127.0.0.1.nip.io`) is a
+wildcard domain — *any* subdomain of it (`login.127.0.0.1.nip.io`,
+`admin.127.0.0.1.nip.io`, ...) resolves to `127.0.0.1` via public DNS. That
+gets you distinct hostnames per service (needed for ForgeOps/Ping-style
+multi-host SSO cookie scoping) with zero setup — no admin rights, unlike
+editing `C:\Windows\System32\drivers\etc\hosts`, which this repo avoids on
+purpose. It's not consumed by `docker-compose.yml`/`Dockerfile` — it's for
+you to pass into whatever Helm install sets your chart's domain/FQDN (check
+`workspace/ia-ext-ciam`'s `values.yaml` for the exact flag), and it's
+already available as a plain `$INGRESS_DOMAIN` shell variable in every
+container shell (`.env` is `source`d automatically, same as `PROXY_*`).
+
+If nip.io's DNS is blocked on your network (some corporate proxies block
+arbitrary DNS lookups), set `INGRESS_DOMAIN` to a real domain instead and
+add matching entries to the Windows hosts file yourself — that path does
+need admin rights.
+
+**Fully offline PC (e.g. only has the shared/loaded image, no internet at
+all — see "Sharing the image" below)?** nip.io needs real DNS just like a
+hosts-file entry needs admin rights, so neither works there. Use
+[`config/open-edge.bat`](config/open-edge.bat) instead: copy it over along
+with the image, then run it (optionally `open-edge.bat mydomain.local` for
+a custom domain, default is `ping.local`). It opens Edge with
+`--host-resolver-rules` mapping `*.<domain>` straight to `127.0.0.1` inside
+the browser itself — no DNS lookup, no admin rights, no system file
+touched, and it works for the life of that Edge window/profile without
+re-running per URL. Set that PC's own `INGRESS_DOMAIN` in `.env` to match
+the domain you pass it.
+
+> If port 80 or 443 is already taken on Windows (IIS, Skype, another local
+> service), `kind create cluster --config config/kind-config.yaml` will
+> fail to bind it — free the port or ask me to change the host-side ports
+> in `kind-config.yaml`.
 
 ## Sharing the image
 
