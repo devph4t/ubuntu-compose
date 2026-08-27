@@ -5,7 +5,10 @@ services:
       # No proxy args here on purpose — .env must never affect the image
       # build. If you ever need a one-off proxied build, pass it manually:
       #   docker compose build --build-arg HTTP_PROXY=http://host:port/ --build-arg HTTPS_PROXY=http://host:port/
-    image: my_wsl_ubuntu:26.04
+    # IMAGE_TAG lets `make build-tag`/`make run-tag` (see Makefile) build or
+    # run under a different tag without editing this file — e.g.
+    # `IMAGE_TAG=mytag docker compose build`. Defaults to 26.04 unmodified.
+    image: my_wsl_ubuntu:${IMAGE_TAG:-26.04}
     container_name: my-ubuntu-vm
     hostname: ubuntu-dev
     command: ["tail", "-f", "/dev/null"]   # keeps the "VM" running
@@ -35,6 +38,12 @@ services:
       NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,kind-worker,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
       no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,kind-worker,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
 
+      # ---- Timezone, from .env's TZ (see .env.example) ----
+      # A container-creation attribute like VM_MEMORY/VM_CPUS above — this
+      # DOES need `docker compose up -d` (recreate) to take effect, unlike
+      # the proxy vars. Defaults to Thailand time if TZ is unset/blank.
+      TZ: "${TZ:-Asia/Bangkok}"
+
     volumes:
       # Talk to the host Docker daemon (docker-outside-of-docker).
       - /var/run/docker.sock:/var/run/docker.sock
@@ -49,13 +58,46 @@ services:
       # safety net auto-run on every shell instead, baked into the
       # Dockerfile's /etc/bash.bashrc — see there for why.)
       - ./config/connect-kind.sh:/usr/local/bin/connect-kind:ro
+      - ./config/connect-registry.sh:/usr/local/bin/connect-registry:ro
       - ./config/pre-scripts/pxset:/usr/local/bin/pxset:ro
+      - ./config/pre-scripts/kind-push:/usr/local/bin/kind-push:ro
+      # Whole config/ folder, so install-cluster-prereqs.sh, kind-config.yaml,
+      # environments/, and fix-and-run.sh are reachable at a stable path
+      # inside the container (bash /root/config/fix-and-run.sh).
+      - ./config:/root/config:ro
       # Live config, read straight from disk (not baked into env at
       # container creation) — edit this file, no rebuild/up/down needed.
       - ./.env:/etc/ping-linux.env:ro
+      # Full Windows C: drive, read-write, at /mnt/c inside the container.
+      # Source is /mnt/c (not C:\) because `docker compose` here runs from
+      # WSL bash, where the CLI expects POSIX paths — WSL already mounts
+      # the C: drive at /mnt/c itself, so that's the path Docker Desktop's
+      # WSL2 backend can actually bind from. (Only Docker Desktop's native
+      # Windows CLI/PowerShell auto-translates `C:\`-style paths.)
+      - /mnt/c:/mnt/c
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Local image registry for kind — `docker push localhost:5000/name:tag`
+  # from ubuntu-dev then pulls into the cluster the normal (fast, streamed,
+  # parallel) way, instead of the single-threaded `kind load docker-image`
+  # tar pipeline that freezes on large images. Runs as a sibling container
+  # on the same host Docker daemon, same as kind's own node containers —
+  # see config/kind-config.yaml and config/connect-registry.sh for how the
+  # cluster is wired to find it.
+  registry:
+    image: registry:2
+    container_name: kind-registry
+    restart: unless-stopped
+    ports:
+      # Bound to loopback only — this registry has no auth and is meant to
+      # be reachable from this host (docker push) and from kind's docker
+      # network (connect-registry.sh), not from the outside.
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+
 volumes:
   kube-config:
+  registry-data:

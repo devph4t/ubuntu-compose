@@ -10,9 +10,16 @@ ARG HTTP_PROXY=""
 ARG HTTPS_PROXY=""
 ARG NO_PROXY="localhost,127.0.0.1,::1,host.docker.internal,kind-control-plane,.svc,.cluster.local,172.18.0.0/16,10.96.0.0/12"
 
+# Baked-in default timezone (Thailand). This is what a standalone/shared
+# copy of the image gets (no .env mounted). When run through this repo's
+# docker-compose.yml, the TZ in .env overrides it via the `environment:`
+# block instead — see docker-compose.yml and .env.example.
+ARG TZ="Asia/Bangkok"
+
 ENV http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} \
     HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY} \
     no_proxy=${NO_PROXY} NO_PROXY=${NO_PROXY} \
+    TZ=${TZ} \
     DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /root/source
@@ -40,13 +47,16 @@ WORKDIR /root/source
 #                      and the Ping Platform UI's ingress.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl wget ca-certificates gnupg lsb-release git vim jq unzip zip tar \
-      bash-completion openssh-client \
+      bash-completion openssh-client ncurses-term \
       build-essential pkg-config make \
       default-jdk maven \
       python3 python3-pip python3-venv python3-dev \
       jose \
       iproute2 iputils-ping dnsutils net-tools netcat-openbsd telnet traceroute \
       ldap-utils postgresql-client openssl \
+      tzdata \
+    && ln -fs "/usr/share/zoneinfo/${TZ}" /etc/localtime \
+    && dpkg-reconfigure -f noninteractive tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Classic developer tooling ----
@@ -124,6 +134,11 @@ RUN curl -sSL https://sdk.cloud.google.com > /tmp/install_gcloud.sh \
     && rm -f /tmp/install_gcloud.sh
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
+# --- yq (latest stable) ----
+RUN wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && \
+    mv yq_linux_amd64 /usr/local/bin/yq && \
+    chmod +x /usr/local/bin/yq
+
 # ---- Bake in the custom commands (connect-kind, pxset) ----
 # This image is meant to be portable — `docker save`d to a .tar and shared
 # to another PC that won't have this repo's config/ folder or
@@ -134,8 +149,11 @@ ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 # config/pre-scripts/pxset still take effect without a rebuild — this COPY
 # only matters once the image is loaded standalone, elsewhere.
 COPY config/connect-kind.sh /usr/local/bin/connect-kind
+COPY config/connect-registry.sh /usr/local/bin/connect-registry
 COPY config/pre-scripts/pxset /usr/local/bin/pxset
-RUN chmod +x /usr/local/bin/connect-kind /usr/local/bin/pxset
+COPY config/pre-scripts/kind-push /usr/local/bin/kind-push
+RUN chmod +x /usr/local/bin/connect-kind /usr/local/bin/connect-registry \
+      /usr/local/bin/pxset /usr/local/bin/kind-push
 
 # ---- Shell: baked-in TAB completion + proxy safety net, EVERY user's shell ----
 # This runs automatically on every `docker exec` shell, so it's baked into

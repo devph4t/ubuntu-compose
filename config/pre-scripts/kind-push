@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Tags and pushes a local image to the kind-registry local registry, so it
+# reaches the kind cluster via a normal streamed/parallel registry pull
+# instead of `kind load docker-image` (which freezes on large images — see
+# config/kind-config.yaml). Requires `connect-registry` to have been run
+# once against the current cluster.
+#
+# Usage:
+#   kind-push <local-image>[:tag]                 # pushed as-is, same name:tag
+#   kind-push <local-image>:tag <remote-name>:tag  # push under a different name
+#
+# Examples:
+#   kind-push myapp:dev
+#     -> docker tag myapp:dev localhost:5000/myapp:dev
+#        docker push localhost:5000/myapp:dev
+#        # reference localhost:5000/myapp:dev in your pod/values
+#
+#   kind-push myapp:dev myapp:latest
+#     -> pushes as localhost:5000/myapp:latest
+
+set -euo pipefail
+
+REGISTRY="localhost:5000"
+
+if [ $# -lt 1 ]; then
+  echo "Usage: kind-push <local-image>[:tag] [remote-name:tag]" >&2
+  exit 1
+fi
+
+LOCAL_IMAGE="$1"
+REMOTE_NAME="${2:-${LOCAL_IMAGE}}"
+REMOTE_IMAGE="${REGISTRY}/${REMOTE_NAME}"
+
+echo "Tagging ${LOCAL_IMAGE} -> ${REMOTE_IMAGE}"
+docker tag "${LOCAL_IMAGE}" "${REMOTE_IMAGE}"
+
+echo "Pushing ${REMOTE_IMAGE}"
+docker push "${REMOTE_IMAGE}"
+
+echo
+echo "Reference this image in your manifests/values as:"
+echo "  ${REMOTE_IMAGE}"

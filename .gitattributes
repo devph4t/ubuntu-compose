@@ -6,7 +6,9 @@
 
 *.sh text eol=lf
 connect-kind.sh text eol=lf
+connect-registry.sh text eol=lf
 pxset text eol=lf
+kind-push text eol=lf
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf

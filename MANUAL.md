@@ -36,6 +36,7 @@ Your Windows username in the examples is `2521183489`. Change it if different.
 7c. [Sharing the image — `docker save`/`docker load`](#5c-portable-image)
 8. [Step-by-step from the start](#6-steps)
 9. [Cluster prerequisites for Ping charts (ServiceMonitor / cert-manager)](#6b-prereqs)
+9b. [Local image registry — fast kind image loads](#6b-prereqs-registry)
 10. [Troubleshooting table](#7-troubleshooting)
 11. [Fallback if cgroup v2 is blocked (k3d)](#8-fallback)
 12. [Daily cheat sheet](#9-cheatsheet)
@@ -52,7 +53,9 @@ Windows  (no administrator needed for anything below)
      │      has: docker CLI, kubectl, helm, kind, go, node, python, gcloud,
      │           kubens/kubectx, pingctl, jose, maven … + TAB completion
      │      talks to the host daemon via the mounted /var/run/docker.sock
-     └─ kind-control-plane ← the cluster kind builds, a SIBLING container
+     ├─ kind-control-plane ← the cluster kind builds, a SIBLING container
+     └─ kind-registry      ← local image registry (docker-compose's `registry`
+                              service), also a SIBLING container — see 9b
 ```
 
 Your "VM" does **not** run its own Docker. It borrows the host's Docker through
@@ -76,16 +79,20 @@ Put these inside it:
 ```
 ubuntu\
 ├── Dockerfile
-├── docker-compose.yml
-├── .env                  ← copy from .env.example; PROXY_ACTIVE/PROXY_HOST/PROXY_PORT + VM_MEMORY/VM_CPUS
+├── docker-compose.yml    ← also runs the `registry` service (kind-registry) — see section 6b
+├── .env                  ← copy from .env.example; PROXY_ACTIVE/PROXY_HOST/PROXY_PORT + VM_MEMORY/VM_CPUS + TZ
 ├── .env.example
-├── config\
+├── config\               ← the whole folder is ALSO bind-mounted at /root/config inside the container
 │   ├── connect-kind.sh   ← mounted onto PATH, run explicitly: `connect-kind`
+│   ├── connect-registry.sh ← mounted onto PATH, run explicitly: `connect-registry`
+│   ├── kind-config.yaml  ← `kind create cluster --config /root/config/kind-config.yaml`
+│   ├── fix-and-run.sh    ← one-shot: CRLF fix + install-cluster-prereqs.sh + accelerator upgrade
 │   ├── wslconfig.example
 │   ├── install-cluster-prereqs.sh
 │   ├── environments\local\cert-manager-values.yaml
 │   └── pre-scripts\
-│       └── pxset          ← mounted onto PATH, run explicitly: `pxset set`
+│       ├── pxset         ← mounted onto PATH, run explicitly: `pxset set`
+│       └── kind-push     ← mounted onto PATH, run explicitly: `kind-push myapp:dev`
 └── workspace\           ← you create this; your repos (ia-ext-ciam) go here
 ```
 
@@ -111,6 +118,13 @@ differently on purpose:
   container-creation attributes, so there's no way around needing `docker
   compose up -d` (recreate) after changing them. Keep them at or below what
   you set in `.wslconfig` (see `config\wslconfig.example`).
+- `TZ` **is** also standard `${VAR}` substitution, consumed by
+  `docker-compose.yml`'s `environment:` block — a container-creation
+  attribute like `VM_MEMORY`/`VM_CPUS`, so it needs `docker compose up -d`
+  (recreate) too. Defaults to `Asia/Bangkok` (Thailand, UTC+7) if unset or
+  blank; the image also bakes that same default into `tzdata` at build
+  time, so a standalone/shared copy of the image (no `.env` mounted) still
+  comes up on Thailand time.
 
 And one file goes in your **user home**, not the project folder (copy it from
 `config/wslconfig.example`):
@@ -207,7 +221,7 @@ WORKDIR /root/source
 #                        and the Ping Platform UI's ingress.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl wget ca-certificates gnupg lsb-release git vim jq unzip zip tar \
-      bash-completion openssh-client \
+      bash-completion openssh-client ncurses-term \
       build-essential pkg-config make \
       default-jdk maven \
       python3 python3-pip python3-venv python3-dev \
@@ -387,7 +401,7 @@ CMD ["tail", "-f", "/dev/null"]
 | Docker | `docker` CLI + `docker compose` plugin (talks to host daemon) |
 | Network/debug | `iproute2`, `ping`, `dig`/`nslookup`, `net-tools`, `netcat`, `telnet`, `traceroute`, `lsof` |
 | Classic dev tools | `less`, `nano`, `tree`, `htop`, `tmux`, `ripgrep` (`rg`), `fd-find` (`fd`), `rsync`, `patch`, `file`, `sudo`, `git-lfs`, `python-is-python3` (`python`), `pipx` |
-| Shell | `bash-completion` + TAB completion wired for kubectl/helm/kind/kubectx/kubens/gcloud, plus `k` alias |
+| Shell | `bash-completion` + TAB completion wired for kubectl/helm/kind/kubectx/kubens/gcloud, plus `k` alias; `ncurses-term` for broader `TERM` compatibility with Windows terminals |
 
 Verify after build (inside the container):
 ```bash
@@ -712,6 +726,15 @@ Enter it (your "ssh into the VM"):
 ```powershell
 docker compose exec ubuntu-dev bash
 ```
+**Running this from Git Bash (Git for Windows' bundled `bash.exe`)?** Prefix
+it with `winpty`, or you'll hit `bash: $'\r': command not found` the moment
+the shell opens — a pty-allocation quirk, not a bug in this repo (see the
+troubleshooting table, section 10):
+```bash
+winpty docker compose exec ubuntu-dev bash
+```
+PowerShell and Windows Terminal don't need this.
+
 Sanity check inside (see the fuller list in [section 5](#3b-tooling)):
 ```bash
 docker ps                 # proves the socket works
@@ -724,9 +747,11 @@ TAB completion is already active: type `kubectl get po<TAB>` or `k get <TAB>`.
 ### Step 3 — Create the cluster
 Inside the container:
 ```bash
-kind create cluster
+kind create cluster --config /root/config/kind-config.yaml
 ```
 With cgroup v2 this now finishes "Starting control-plane" instead of failing.
+The `--config` wires containerd to pull images through the local registry —
+see section 9b below for why that matters and what it replaces.
 
 ### Step 4 — Wire kubectl (fixes localhost:8080)
 ```bash
@@ -735,6 +760,19 @@ connect-kind
 You should see a node `Ready`. Re-run `connect-kind` any time you recreate the
 cluster. (If you ever get a `^M` error, the file was saved CRLF — re-save as LF
 on Windows; do not `sed` it in place because it's mounted read-only.)
+
+### Step 4b — Wire the local registry
+```bash
+connect-registry
+```
+Attaches `kind-registry` (docker-compose's `registry` service) to kind's
+network and advertises it to the cluster. Re-run any time you recreate the
+cluster, same as `connect-kind`. From here on, build+push instead of
+`kind load docker-image`:
+```bash
+docker build -t myapp:dev .
+kind-push myapp:dev   # tags + pushes to localhost:5000/myapp:dev
+```
 
 ### Step 5 — Deploy your charts
 ```bash
@@ -792,6 +830,55 @@ cd /root/source/ia-ext-ciam
 `GCP_SERVICE_KEY length: 0` in the accelerator output is fine for `local` (it's
 only needed for non-local environments).
 
+**One-shot alternative:** once the cluster exists and Steps 4/4b have run,
+`config/fix-and-run.sh` (mounted at `/root/config/fix-and-run.sh`) does all
+of the above for you — including fixing any CRLF line endings under
+`workspace/` first (a recurring problem for scripts checked out on Windows,
+notably `ia-ext-ciam`'s `charts/midships-ping-ais-accelerator/upgrade.sh`,
+since that repo's line-ending policy is outside this one's `.gitattributes`
+control):
+```bash
+bash /root/config/fix-and-run.sh
+```
+It resolves its own paths (from `install-cluster-prereqs.sh`'s location and
+from `/root/source`), so it works the same whether run inside the container
+or, less commonly, directly from this repo's root on the host.
+
+---
+
+<a name="6b-prereqs-registry"></a>
+## 9b. Local image registry — why `kind load docker-image` freezes on big images
+
+`kind load docker-image` does a `docker save` of the image into a tar
+stream, then imports that tar into the node container — a single-threaded
+compress/decompress pipeline. On a large image (the accelerator images, or
+this repo's own multi-GB `my_wsl_ubuntu` image, are typical sizes) that can
+sit for a long time looking hung. `docker stats` showing the kind node's CPU
+pegged during this is real, but it's one core doing tar/gzip work — neither
+`VM_CPUS` (that limit is on `ubuntu-dev`, not the sibling `kind-control-plane`
+container) nor more WSL2 processors in `.wslconfig` speeds up a
+single-threaded step.
+
+The fix wired into this repo: a local registry
+(`docker-compose.yml`'s `registry` service, container name `kind-registry`,
+published at `127.0.0.1:5000`) that the cluster's containerd is configured
+to pull from directly (`config/kind-config.yaml`'s
+`containerdConfigPatches`, applied via `kind create cluster --config
+config/kind-config.yaml` — Step 3). `connect-registry` (Step 4b) attaches
+the registry to kind's docker network and advertises the mapping to the
+cluster. From then on:
+
+```bash
+docker build -t myapp:dev .
+kind-push myapp:dev    # tags + pushes to localhost:5000/myapp:dev, see config/pre-scripts/kind-push
+# reference localhost:5000/myapp:dev in your pod/values — no `kind load` step, ever
+```
+
+This is a normal registry pull — layered, streamed, and (for multi-node
+clusters) parallel across nodes — which is why it doesn't hit the same wall
+as the tar-based `kind load` path, especially as images grow or get pushed
+repeatedly across a session.
+
 ---
 
 <a name="7-troubleshooting"></a>
@@ -811,7 +898,9 @@ only needed for non-local environments).
 | `no matches for kind "Certificate"/"ClusterIssuer"` | cert-manager CRDs missing / wrong order | install cert-manager with `--set crds.enabled=true` first (section 9) |
 | helm/kubectl hang through proxy | proxy intercepting cluster traffic | `NO_PROXY` (already in compose) |
 | `$env:KUBECONFIG: command not found` | PowerShell syntax used in bash | in bash: `export KUBECONFIG=/root/.kube/config` |
+| `bash: $'\r': command not found` right after `docker compose exec ubuntu-dev bash` | Not a repo/file issue — `/etc/bash.bashrc` is generated LF-clean at build time regardless of host OS (verify: `docker compose exec ubuntu-dev bash -c 'cat -A /etc/bash.bashrc \| grep -c "\^M\$"'` should print `0`). Confirmed cause: Git for Windows' bundled `bash.exe` (GNU bash via MSYS2) doesn't allocate a proper pty for `docker exec` on its own. | Prefix with `winpty`: `winpty docker compose exec ubuntu-dev bash`. Or run the same command from PowerShell / Windows Terminal instead of Git Bash. |
 | helm `curl ... githubusercontent.com` fails | incomplete URL | `https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3` |
+| `kind load docker-image` looks frozen on a large image; `docker stats` shows the kind node's CPU pegged but nothing progresses | single-threaded `docker save`/tar-import pipeline — more CPU doesn't parallelize it, and `VM_CPUS` doesn't even apply to the sibling kind node container | use the local registry instead (section 9b): `docker build -t myapp:dev .` then `kind-push myapp:dev` |
 
 Deeper diagnosis if control-plane still won't start:
 ```bash
@@ -852,9 +941,15 @@ docker info | Select-String cgroup       # confirm cgroup v2
 
 **Inside the VM (bash):**
 ```bash
-kind create cluster        # make a cluster
+kind create cluster --config /root/config/kind-config.yaml   # make a cluster (wired to the local registry)
 connect-kind               # wire kubectl to it
+connect-registry           # wire the local registry into it
 kubectl get nodes          # verify  (k get nodes — alias + TAB completion work)
+
+bash /root/config/fix-and-run.sh   # one-shot: cluster prereqs + accelerator upgrade
+
+docker build -t myapp:dev .
+kind-push myapp:dev        # tag + push to localhost:5000/myapp:dev — instead of `kind load docker-image`
 
 kubens                     # list namespaces / switch:  kubens ping-ais
 kubectx                    # list/switch contexts

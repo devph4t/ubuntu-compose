@@ -1,0 +1,26 @@
+# kind cluster config — wires containerd to pull through the local registry
+# (see docker-compose.yml's `registry` service and config/connect-registry.sh)
+# instead of relying on `kind load docker-image`, which freezes on large
+# images because it's a single-threaded docker-save/tar-import pipeline.
+# Pulling from a registry is the normal layered, streamed, parallel image
+# pull path — the fix for that freeze, not a workaround for it.
+#
+# Usage:
+#   kind create cluster --config config/kind-config.yaml
+#   connect-registry              # after cluster creation — see that script
+#
+# Then instead of `kind load docker-image local/name:tag`:
+#   docker build -t localhost:5000/name:tag .
+#   docker push localhost:5000/name:tag
+#   # reference localhost:5000/name:tag in your pod/values — no load step
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  # Every node pulls "localhost:5000/*" by actually talking to the
+  # kind-registry sibling container over the "kind" docker network
+  # (connect-registry.sh attaches it there and kubectl-applies the
+  # matching kube-public/local-registry-hosting ConfigMap that tells
+  # tooling this mapping exists — see that script for details).
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+      endpoint = ["http://kind-registry:5000"]
